@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"log"
+	"runtime"
 
 	"github.com/hashicorp/terraform/terraform"
 )
@@ -155,7 +157,7 @@ func (d *ResourceData) Set(key string, value interface{}) error {
 			}
 		}
 	}
-
+	log.Printf("ResourceData::Set key: %v value: %+v", key, value);
 	return d.setWriter.WriteField(strings.Split(key, "."), value)
 }
 
@@ -384,14 +386,27 @@ func (d *ResourceData) get(addr []string, source getSource) getResult {
 	var result FieldReadResult
 	var err error
 	if exact {
+		log.Printf("exact: %v, level: %v", addr, level);
 		result, err = d.multiReader.ReadFieldExact(addr, level)
 	} else {
+		log.Printf("not exact: %v, level: %v", addr, level);
+		var i int = 0
+		var file string
+		var line int
+		var ok bool = true;
+		for (ok) {
+			_, file, line, ok = runtime.Caller(i)
+			i = i + 1
+			if (ok) {
+				log.Printf("file: %v line: %v", file, line)
+			}
+		}
 		result, err = d.multiReader.ReadFieldMerge(addr, level)
 	}
 	if err != nil {
 		panic(err)
 	}
-
+	log.Printf("result.value: %+v", result.Value)
 	// If the result doesn't exist, then we set the value to the zero value
 	var schema *Schema
 	if schemaL := addrToSchema(addr, d.schema); len(schemaL) > 0 {
