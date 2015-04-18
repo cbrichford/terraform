@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/awslabs/aws-sdk-go/aws"
@@ -12,7 +14,13 @@ import (
 	"github.com/hashicorp/terraform/helper/hashcode"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
+	"github.com/hashicorp/terraform/terraform"
 )
+
+// Hash code fro security group references.
+func securityGroupHash(v interface{}) int {
+	return hashcode.String(v.(string))
+}
 
 func resourceAwsSecurityGroup() *schema.Resource {
 	return &schema.Resource{
@@ -70,9 +78,7 @@ func resourceAwsSecurityGroup() *schema.Resource {
 							Type:     schema.TypeSet,
 							Optional: true,
 							Elem:     &schema.Schema{Type: schema.TypeString},
-							Set: func(v interface{}) int {
-								return hashcode.String(v.(string))
-							},
+							Set:      securityGroupHash,
 						},
 
 						"self": &schema.Schema{
@@ -89,6 +95,7 @@ func resourceAwsSecurityGroup() *schema.Resource {
 				Type:     schema.TypeSet,
 				Optional: true,
 				Computed: true,
+				Default:  &schema.Set{F: resourceAwsSecurityGroupRuleHash},
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"from_port": &schema.Schema{
@@ -116,9 +123,7 @@ func resourceAwsSecurityGroup() *schema.Resource {
 							Type:     schema.TypeSet,
 							Optional: true,
 							Elem:     &schema.Schema{Type: schema.TypeString},
-							Set: func(v interface{}) int {
-								return hashcode.String(v.(string))
-							},
+							Set:      securityGroupHash,
 						},
 
 						"self": &schema.Schema{
@@ -186,6 +191,293 @@ func resourceAwsSecurityGroupCreate(d *schema.ResourceData, meta interface{}) er
 	return resourceAwsSecurityGroupUpdate(d, meta)
 }
 
+// Copies a map that represents a security group rule.
+func copyRuleMap(ruleMap map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	for k, v := range ruleMap {
+		result[k] = v
+	}
+	return result
+}
+
+// Casts the value of the ingress or egress field
+// of a security group dictionary to a slice whose entries
+// are maps for each security group rule.
+func castRules(rules interface{}) []map[string]interface{} {
+	var rulesList []map[string]interface{}
+	rulesList, ok := rules.([]map[string]interface{})
+	if !ok {
+		rulesList = make([]map[string]interface{}, 0)
+		rawList := rules.([]interface{})
+		for _, r := range rawList {
+			rulesList = append(rulesList, r.(map[string]interface{}))
+		}
+	}
+	return rulesList
+}
+
+// Selects a computed value for a field of a rule or the
+// raw value if there is no computed value for that field.
+func chooseRuleValue(name string,
+	rawRule map[string]interface{},
+	configRule map[string]interface{}) (interface{}, bool, bool) {
+	value, ok := configRule[name]
+	if ok {
+		return value, true, true
+	}
+	value, ok = rawRule[name]
+	return value, false, ok
+}
+
+// Copies a field value from one rule's pair of maps to another rule's pair of maps.
+// Each rule has a pair of maps, one for faw field value and another for computed
+// field values.
+func copyRuleValue(name string,
+	srcRawRule map[string]interface{},
+	srcConfigRule map[string]interface{},
+	destRawRule map[string]interface{},
+	destConfigRule map[string]interface{}) interface{} {
+	value, finalValueKnown, exists := chooseRuleValue(name, srcRawRule, srcConfigRule)
+	if !exists {
+		return nil
+	}
+	destRawRule[name] = value
+	if finalValueKnown {
+		destConfigRule[name] = value
+	}
+	return value
+}
+
+func castToSlice(input interface{}) []interface{} {
+	iv := reflect.ValueOf(input)
+	if iv.Kind() == reflect.Slice {
+		return input.([]interface{})
+	}
+	return input.(*schema.Set).List()
+}
+
+//
+func normalizeSecurityGroupRules(groupId string,
+	rawRules interface{},
+	configRules interface{}) ([]map[string]interface{}, []map[string]interface{}, error) {
+	destRawRules := make([]map[string]interface{}, 0)
+	destConfigRules := make([]map[string]interface{}, 0)
+
+	if rawRules == nil {
+		return destRawRules, destConfigRules, nil
+	}
+	srcRawRulesSlice := castRules(rawRules)
+	configRulesSlice := castRules(configRules)
+
+	for i, srcRawRule := range srcRawRulesSlice {
+		srcConfigRule := configRulesSlice[i]
+		baseRawRule := make(map[string]interface{})
+		baseConfigRule := make(map[string]interface{})
+
+		copyRuleValue("from_port", srcRawRule, srcConfigRule, baseRawRule, baseConfigRule)
+		copyRuleValue("to_port", srcRawRule, srcConfigRule, baseRawRule, baseConfigRule)
+		copyRuleValue("protocol", srcRawRule, srcConfigRule, baseRawRule, baseConfigRule)
+		selfRaw := copyRuleValue("self", srcRawRule, srcConfigRule, baseRawRule, baseConfigRule)
+
+		cidrBlocksRaw, cidrBlocksKnown, cidrBlocksExists := chooseRuleValue("cidr_blocks", srcRawRule, srcConfigRule)
+		secGroupsRaw, secGroupsKnown, secGroupsExists := chooseRuleValue("security_groups", srcRawRule, srcConfigRule)
+
+		log.Printf("cidrBlocksRaw: %+v", cidrBlocksRaw)
+		log.Printf("secGroupsRaw: %+v", secGroupsRaw)
+
+		if selfRaw != nil {
+			self, ok := selfRaw.(bool)
+			if self && ok {
+				newRawRule := copyRuleMap(baseRawRule)
+				newConfigRule := copyRuleMap(baseConfigRule)
+				newRawRule["self"] = true
+				newConfigRule["self"] = true
+
+				destRawRules = append(destRawRules, newRawRule)
+				destConfigRules = append(destConfigRules, newConfigRule)
+			}
+		}
+
+		if cidrBlocksRaw != nil && cidrBlocksExists {
+			cidrBlocks := cidrBlocksRaw.([]interface{})
+			for _, cidrBlock := range cidrBlocks {
+				newRawRule := copyRuleMap(baseRawRule)
+				newConfigRule := copyRuleMap(baseConfigRule)
+				newCIDRBlocks := []interface{}{cidrBlock}
+				if cidrBlocksKnown {
+					newConfigRule["cidr_blocks"] = newCIDRBlocks
+				}
+				newRawRule["cidr_blocks"] = newCIDRBlocks
+
+				destRawRules = append(destRawRules, newRawRule)
+				destConfigRules = append(destConfigRules, newConfigRule)
+			}
+		}
+
+		if secGroupsRaw != nil && secGroupsExists {
+			securityGroups := castToSlice(secGroupsRaw)
+			for _, securityGroupRaw := range securityGroups {
+				// Skip a security group reference that is covered
+				// by 'self' above
+				securityGroup, _ := securityGroupRaw.(string)
+				if securityGroup == groupId {
+					continue
+				}
+				newRawRule := copyRuleMap(baseRawRule)
+				newConfigRule := copyRuleMap(baseConfigRule)
+				newSecGroups := []interface{}{securityGroup}
+				if secGroupsKnown {
+					newConfigRule["security_groups"] = newSecGroups
+				} else if !strings.Contains(securityGroup, "${") {
+					newConfigRule["security_groups"] = newSecGroups
+				}
+				newRawRule["security_groups"] = newSecGroups
+
+				destRawRules = append(destRawRules, newRawRule)
+				destConfigRules = append(destConfigRules, newConfigRule)
+			}
+		}
+	}
+	log.Printf("normalizeSecurityGroup Raw: %+v Config: %+v", destRawRules, destConfigRules)
+	return destRawRules, destConfigRules, nil
+}
+
+func (p *AWSProvider) diffSecurityGroups(
+	r *schema.Resource,
+	s *terraform.InstanceState,
+	c *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
+
+	// Copy the schem map without the egress and ingress entries, we do this
+	// so that the diff will ignore these fields.  We'll check those by hand.
+
+	var egressSchema *schema.Schema
+	var ingressSchema *schema.Schema
+
+	noRulesSchema := make(map[string]*schema.Schema)
+	for k, v := range r.Schema {
+		switch k {
+		case "egress":
+			egressSchema = v
+		case "ingress":
+			ingressSchema = v
+		default:
+			noRulesSchema[k] = v
+		}
+	}
+
+	noRulesResource := *r
+	noRulesResource.Schema = noRulesSchema
+
+	noRulesDiff, err := noRulesResource.Diff(s, c)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Raw ingress: %+v Config ingress: %+v ComputedKeys: %+v", c.Raw["ingress"], c.Config["ingress"], c.ComputedKeys)
+
+	rulesSchema := make(map[string]*schema.Schema)
+	rulesSchema["egress"] = egressSchema
+	rulesSchema["ingress"] = ingressSchema
+
+	rulesResource := *r
+	rulesResource.Schema = rulesSchema
+
+	resourceConfigCopy := terraform.NewResourceConfig(nil)
+	resourceConfigCopy.ComputedKeys = c.ComputedKeys
+	resourceConfigCopy.Raw = make(map[string]interface{})
+	resourceConfigCopy.Config = make(map[string]interface{})
+	egressSliceRaw, egressSliceConfig, _ := normalizeSecurityGroupRules(s.ID, c.Raw["egress"], c.Config["egress"])
+	resourceConfigCopy.Raw["egress"] = egressSliceRaw
+	resourceConfigCopy.Config["egress"] = egressSliceConfig
+
+	ingressSliceRaw, ingressSliceConfig, _ := normalizeSecurityGroupRules(s.ID, c.Raw["ingress"], c.Config["ingress"])
+	resourceConfigCopy.Raw["ingress"] = ingressSliceRaw
+	resourceConfigCopy.Config["ingress"] = ingressSliceConfig
+
+	rulesStateReader := schema.MapFieldReader{schema.BasicMapReader(s.Attributes), rulesSchema}
+	rulesStateWriter := schema.MapFieldWriter{Schema: rulesSchema}
+
+	egressRulesReadResult, err := rulesStateReader.ReadField([]string{"egress"})
+	if (err == nil) && (egressRulesReadResult.Exists) && (egressRulesReadResult.Value != nil) {
+		egressRulesSet := egressRulesReadResult.Value
+		egressRulesList := egressRulesSet.(*schema.Set).List()
+		normalizedEgressRules, _, _ := normalizeSecurityGroupRules(s.ID,
+			egressRulesList,
+			egressRulesList)
+		log.Printf("state egress ID: %+v norm: %+v", s.ID, normalizedEgressRules)
+
+		err := rulesStateWriter.WriteField([]string{"egress"}, normalizedEgressRules)
+		if err != nil {
+			log.Printf("write failed state egress ID: %+v err: %+v", s.ID, err)
+		}
+	}
+
+	ingressRulesReadResult, err := rulesStateReader.ReadField([]string{"ingress"})
+	if (err == nil) && (ingressRulesReadResult.Exists) && (ingressRulesReadResult.Value != nil) {
+		ingressRulesSet := ingressRulesReadResult.Value
+		ingressRulesList := ingressRulesSet.(*schema.Set).List()
+		log.Printf("state ingress ID: %+v state: %+v", s.ID, ingressRulesList)
+		normalizedIngressRules, _, _ := normalizeSecurityGroupRules(s.ID,
+			ingressRulesList,
+			ingressRulesList)
+		log.Printf("state ingress ID: %+v norm: %+v", s.ID, normalizedIngressRules)
+
+		err := rulesStateWriter.WriteField([]string{"ingress"}, normalizedIngressRules)
+		if err != nil {
+			log.Printf("write failed state ingress ID: %+v err: %+v", s.ID, err)
+		}
+	}
+
+	rulesInstanceState := *s
+	rulesInstanceState.Attributes = rulesStateWriter.Map()
+	log.Printf("normalized rule state: %+v", s.ID, rulesInstanceState.Attributes)
+
+	rulesDiff, err := rulesResource.Diff(&rulesInstanceState, resourceConfigCopy)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var destroy bool = false
+	var destroyTainted bool = false
+	var empty = true
+	diffMap := make(map[string]*terraform.ResourceAttrDiff)
+
+	if noRulesDiff != nil && !noRulesDiff.Empty() {
+		destroy = destroy || noRulesDiff.Destroy
+		destroyTainted = destroyTainted || noRulesDiff.DestroyTainted
+		empty = empty && noRulesDiff.Empty()
+
+		for k, v := range noRulesDiff.Attributes {
+			diffMap[k] = v
+		}
+	}
+
+	if rulesDiff != nil && !rulesDiff.Empty() {
+		destroy = destroy || rulesDiff.Destroy
+		destroyTainted = destroyTainted || rulesDiff.DestroyTainted
+		empty = empty && rulesDiff.Empty()
+
+		for k, v := range rulesDiff.Attributes {
+			diffMap[k] = v
+		}
+	}
+
+	if empty {
+		return nil, nil
+	}
+
+	diff := &terraform.InstanceDiff{Attributes: diffMap,
+		Destroy:        destroy,
+		DestroyTainted: destroyTainted}
+
+	for k, v := range diff.Attributes {
+		log.Printf("myDiff k: %+v, v: %+v", k, v)
+	}
+
+	return diff, nil
+}
+
 func resourceAwsSecurityGroupRead(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).ec2conn
 
@@ -202,6 +494,8 @@ func resourceAwsSecurityGroupRead(d *schema.ResourceData, meta interface{}) erro
 
 	ingressRules := resourceAwsSecurityGroupIPPermGather(d, sg.IPPermissions)
 	egressRules := resourceAwsSecurityGroupIPPermGather(d, sg.IPPermissionsEgress)
+
+	log.Printf("group: %v egressRules: %+v", d.Id(), egressRules)
 
 	d.Set("description", sg.Description)
 	d.Set("name", sg.GroupName)
@@ -318,38 +612,29 @@ func resourceAwsSecurityGroupRuleHash(v interface{}) int {
 }
 
 func resourceAwsSecurityGroupIPPermGather(d *schema.ResourceData, permissions []*ec2.IPPermission) []map[string]interface{} {
-	ruleMap := make(map[string]map[string]interface{})
-	for _, perm := range permissions {
-		var fromPort, toPort *int64
+	ruleSlice := make([]map[string]interface{}, len(permissions))
+	for i, perm := range permissions {
+		var fromPort int64 = 0
+		var toPort int64 = 65535
 		if v := perm.FromPort; v != nil {
-			fromPort = v
+			fromPort = *v
 		}
 		if v := perm.ToPort; v != nil {
-			toPort = v
+			toPort = *v
 		}
+		m := make(map[string]interface{})
+		ruleSlice[i] = m
 
-		k := fmt.Sprintf("%s-%d-%d", *perm.IPProtocol, fromPort, toPort)
-		m, ok := ruleMap[k]
-		if !ok {
-			m = make(map[string]interface{})
-			ruleMap[k] = m
-		}
-
+		log.Printf("group: %v, from_port: %v, to_port: %v", d.Id(), fromPort, toPort)
 		m["from_port"] = fromPort
 		m["to_port"] = toPort
 		m["protocol"] = *perm.IPProtocol
-
 		if len(perm.IPRanges) > 0 {
-			raw, ok := m["cidr_blocks"]
-			if !ok {
-				raw = make([]string, 0, len(perm.IPRanges))
-			}
-			list := raw.([]string)
+			list := make([]string, 0, len(perm.IPRanges))
 
 			for _, ip := range perm.IPRanges {
 				list = append(list, *ip.CIDRIP)
 			}
-
 			m["cidr_blocks"] = list
 		}
 
@@ -357,34 +642,27 @@ func resourceAwsSecurityGroupIPPermGather(d *schema.ResourceData, permissions []
 		if len(perm.UserIDGroupPairs) > 0 {
 			groups = flattenSecurityGroups(perm.UserIDGroupPairs)
 		}
-		for i, id := range groups {
-			if id == d.Id() {
-				groups[i], groups = groups[len(groups)-1], groups[:len(groups)-1]
-				m["self"] = true
-			}
-		}
 
 		if len(groups) > 0 {
-			raw, ok := m["security_groups"]
-			if !ok {
-				raw = make([]string, 0, len(groups))
+			for i, id := range groups {
+				if id == d.Id() {
+					groups[i], groups = groups[len(groups)-1], groups[:len(groups)-1]
+					m["self"] = true
+				}
 			}
-			list := raw.([]string)
-
+			list := make([]string, 0, len(groups))
 			list = append(list, groups...)
 			m["security_groups"] = list
 		}
 	}
-	rules := make([]map[string]interface{}, 0, len(ruleMap))
-	for _, m := range ruleMap {
-		rules = append(rules, m)
-	}
-	return rules
+	return ruleSlice
 }
 
 func resourceAwsSecurityGroupUpdateRules(
 	d *schema.ResourceData, ruleset string,
 	meta interface{}, group *ec2.SecurityGroup) error {
+
+	log.Printf("ruleset: %v", ruleset)
 
 	if d.HasChange(ruleset) {
 		o, n := d.GetChange(ruleset)

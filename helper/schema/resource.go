@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"log"
 
 	"github.com/hashicorp/terraform/terraform"
 )
@@ -171,6 +172,9 @@ func (r *Resource) Validate(c *terraform.ResourceConfig) ([]string, []error) {
 func (r *Resource) Refresh(
 	s *terraform.InstanceState,
 	meta interface{}) (*terraform.InstanceState, error) {
+
+	log.Printf("Resource::Refresh: r.exists: %v", r.Exists)
+
 	if r.Exists != nil {
 		// Make a copy of data so that if it is modified it doesn't
 		// affect our Read later.

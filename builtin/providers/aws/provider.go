@@ -1,16 +1,41 @@
 package aws
 
 import (
+	"fmt"
+
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/terraform"
 )
+
+// AWS provider needs to override the default Diff method.
+type AWSProvider struct {
+	schema.Provider
+}
+
+// AWS security group resources need a special diff implementation.
+// Security group resources need to be normalized before comparing them
+// to their state.
+func (p *AWSProvider) Diff(
+	info *terraform.InstanceInfo,
+	s *terraform.InstanceState,
+	c *terraform.ResourceConfig) (*terraform.InstanceDiff, error) {
+
+	if info.Type == "aws_security_group" {
+		r, ok := p.ResourcesMap["aws_security_group"]
+		if !ok {
+			return nil, fmt.Errorf("unknown resource type: %s", info.Type)
+		}
+		return p.diffSecurityGroups(r, s, c)
+	}
+	return p.Provider.Diff(info, s, c)
+}
 
 // Provider returns a terraform.ResourceProvider.
 func Provider() terraform.ResourceProvider {
 	// TODO: Move the validation to this, requires conditional schemas
 	// TODO: Move the configuration to this, requires validation
 
-	return &schema.Provider{
+	return &AWSProvider{schema.Provider{
 		Schema: map[string]*schema.Schema{
 			"access_key": &schema.Schema{
 				Type:     schema.TypeString,
@@ -72,7 +97,7 @@ func Provider() terraform.ResourceProvider {
 		},
 
 		ConfigureFunc: providerConfigure,
-	}
+	}}
 }
 
 var descriptions map[string]string

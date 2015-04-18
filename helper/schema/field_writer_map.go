@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"log"
+	"runtime"
 
 	"github.com/mitchellh/mapstructure"
 )
@@ -62,11 +64,12 @@ func (w *MapFieldWriter) WriteField(addr []string, value interface{}) error {
 				strings.Join(addr, "."))
 		}
 	}
-
+	log.Printf("MapFieldWriter::WriteField addr: %v value:%+v type: %v", addr, value, schemaList[len(schemaList) - 1])
 	return w.set(addr, value)
 }
 
 func (w *MapFieldWriter) set(addr []string, value interface{}) error {
+	log.Printf("MapFieldWriter::set addr: %+v value: %+v", addr, value)
 	schemaList := addrToSchema(addr, w.Schema)
 	if len(schemaList) == 0 {
 		return fmt.Errorf("Invalid address to set: %#v", addr)
@@ -271,11 +274,28 @@ func (w *MapFieldWriter) setSet(
 		// Build a temp *ResourceData to use for the conversion
 		tempSchema := *schema
 		tempSchema.Type = TypeList
-		tempSchemaMap := map[string]*Schema{addr[0]: &tempSchema}
+		tempAddr := make([]string, 1, 2);
+		tempAddr[0] = addr[len(addr) - 1];
+		tempSchemaMap := map[string]*Schema{tempAddr[0]: &tempSchema}
 		tempW := &MapFieldWriter{Schema: tempSchemaMap}
 
 		// Set the entire list, this lets us get sane values out of it
-		if err := tempW.WriteField(addr, value); err != nil {
+		if err := tempW.WriteField(tempAddr, value); err != nil {
+			log.Printf("writeField failed! addr: %+v value: %+v tempSchema: %+v err: %+v", addr, value, tempSchema, err);
+			{
+				var i int = 0
+				var file string
+				var line int
+				var ok bool = true;
+				for (ok) {
+					_, file, line, ok = runtime.Caller(i)
+					i = i + 1
+					if (ok) {
+						log.Printf("file: %v line: %v", file, line)
+					}
+				}
+			}
+
 			return err
 		}
 
@@ -291,8 +311,9 @@ func (w *MapFieldWriter) setSet(
 		}
 		for i := 0; i < v.Len(); i++ {
 			is := strconv.FormatInt(int64(i), 10)
-			result, err := tempR.ReadField(append(addrCopy, is))
+			result, err := tempR.ReadField(append(tempAddr, is))
 			if err != nil {
+				log.Printf("ReadField failed! err: %+v", err)
 				return err
 			}
 			if !result.Exists {
@@ -313,5 +334,6 @@ func (w *MapFieldWriter) setSet(
 	}
 
 	w.result[k+".#"] = strconv.Itoa(value.(*Set).Len())
+	log.Printf("MapFieldWriter::setSet result: %+v", w.result)
 	return nil
 }

@@ -14,6 +14,7 @@ package schema
 import (
 	"fmt"
 	"os"
+	"log"
 	"reflect"
 	"sort"
 	"strconv"
@@ -254,7 +255,9 @@ func (m schemaMap) Diff(
 	}
 
 	for k, schema := range m {
+		log.Printf("Diff k: %v\n", k)
 		err := m.diff(k, schema, result, d, false)
+		log.Printf("result: %v err: %v", result.Empty(), err);
 		if err != nil {
 			return nil, err
 		}
@@ -476,6 +479,9 @@ func (m schemaMap) diff(
 	d *ResourceData,
 	all bool) error {
 	var err error
+
+	log.Printf("diff k: %v type: %v", k, schema.Type);
+
 	switch schema.Type {
 	case TypeBool:
 		fallthrough
@@ -504,7 +510,10 @@ func (m schemaMap) diffList(
 	diff *terraform.InstanceDiff,
 	d *ResourceData,
 	all bool) error {
+
+	log.Printf("diffList k: %v", k)
 	o, n, _, computedList := d.diffChange(k)
+	log.Printf("diffChange result k: %v, o:%+v, n:%+v, computedList: %v", k, o, n, computedList);
 	if computedList {
 		n = nil
 	}
@@ -624,15 +633,24 @@ func (m schemaMap) diffMap(
 	all bool) error {
 	prefix := k + "."
 
+	log.Printf("diffMap k: %v", k)
 	// First get all the values from the state
 	var stateMap, configMap map[string]string
 	o, n, _, _ := d.diffChange(k)
+	log.Printf("diff change ret k: %v, o:%+v, n:%+v", k, o, n);
 	if err := mapstructure.WeakDecode(o, &stateMap); err != nil {
+		log.Printf("weak decode failed: %v, err: %v", o, err);
 		return fmt.Errorf("%s: %s", k, err)
 	}
+	log.Printf("diff change ret k: %v, stateMap:%+v, n:%+v", k, stateMap);
 	if err := mapstructure.WeakDecode(n, &configMap); err != nil {
+		log.Printf("weak decode failed: %v, err: %v", n, err);
 		return fmt.Errorf("%s: %s", k, err)
 	}
+
+	log.Printf("o: %+v", o);
+	log.Printf("n: %+v", n);
+
 
 	// Delete any count values, since we don't use those
 	delete(configMap, "#")
@@ -705,6 +723,7 @@ func (m schemaMap) diffSet(
 	d *ResourceData,
 	all bool) error {
 	o, n, _, computedSet := d.diffChange(k)
+	log.Printf("diffChange returned k: %v o: %+v n: %+v  computedSet: %v", k, o, n, computedSet)
 	if computedSet {
 		n = nil
 	}

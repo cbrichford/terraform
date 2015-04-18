@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"log"
 	"net/rpc"
 
 	"github.com/hashicorp/terraform/terraform"
@@ -131,6 +132,7 @@ func (p *ResourceProvider) Diff(
 		State:  s,
 		Config: c,
 	}
+	log.Printf("rpc diff: %v", p.Name)
 	err := p.Client.Call(p.Name+".Diff", args, &resp)
 	if err != nil {
 		return nil, err
@@ -151,7 +153,9 @@ func (p *ResourceProvider) Refresh(
 		State: s,
 	}
 
+	log.Printf("rpc refresh: %v", p.Name)
 	err := p.Client.Call(p.Name+".Refresh", args, &resp)
+
 	if err != nil {
 		return nil, err
 	}

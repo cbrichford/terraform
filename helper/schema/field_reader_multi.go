@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"log"
 )
 
 // MultiLevelFieldReader reads from other field readers,
@@ -47,7 +48,8 @@ func (r *MultiLevelFieldReader) ReadFieldMerge(
 				return FieldReadResult{}, fmt.Errorf(
 					"Error reading level %s: %s", l, err)
 			}
-
+			log.Printf("Read field: %v level: %v exists: %v", address, l, out.Exists)
+			
 			// TODO: computed
 			if out.Exists {
 				result = out

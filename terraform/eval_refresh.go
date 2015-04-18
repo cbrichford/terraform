@@ -32,10 +32,18 @@ func (n *EvalRefresh) Eval(ctx EvalContext) (interface{}, error) {
 		return nil, err
 	}
 
+	if (n.Info.Type == "aws_security_group") {
+		log.Printf("secgroup: %v", n.Info.Id);
+	}
+
 	// Refresh!
 	state, err = provider.Refresh(n.Info, state)
 	if err != nil {
 		return nil, err
+	}
+
+	if (n.Info.Type == "aws_security_group") {
+		log.Printf("secgroup: %v state:%+v", n.Info.Id, state);
 	}
 
 	// Call post-refresh hook
